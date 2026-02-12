@@ -1,0 +1,12 @@
+{
+  "apiHost": "https://bluecat.example.internal",
+  "apiPath": "/api/v2",
+  "view": "internal",
+  "zone": "example.com",
+  "ttl": 120,
+  "username": "cert-manager",
+  "passwordSecretRef": {
+    "name": "bluecat-auth",
+    "key": "password"
+  }
+}

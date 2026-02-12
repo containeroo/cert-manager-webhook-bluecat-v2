@@ -1,0 +1,76 @@
+version: 2
+project_name: cert-manager-webhook-bluecat-v2
+
+builds:
+  - id: webhook
+    main: .
+    binary: webhook
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+dockers:
+  - id: ghcr-amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    ids:
+      - webhook
+    dockerfile: Dockerfile
+    extra_files:
+      - go.mod
+      - go.sum
+      - main.go
+    image_templates:
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-amd64
+    build_flag_templates:
+      - --pull
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description=cert-manager DNS01 webhook for BlueCat Address Manager REST v2
+      - --label=org.opencontainers.image.url=https://github.com/{{ .Env.GITHUB_REPOSITORY }}
+      - --label=org.opencontainers.image.source=https://github.com/{{ .Env.GITHUB_REPOSITORY }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.licenses=Apache-2.0
+
+  - id: ghcr-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    ids:
+      - webhook
+    dockerfile: Dockerfile
+    extra_files:
+      - go.mod
+      - go.sum
+      - main.go
+    image_templates:
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-arm64
+    build_flag_templates:
+      - --pull
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description=cert-manager DNS01 webhook for BlueCat Address Manager REST v2
+      - --label=org.opencontainers.image.url=https://github.com/{{ .Env.GITHUB_REPOSITORY }}
+      - --label=org.opencontainers.image.source=https://github.com/{{ .Env.GITHUB_REPOSITORY }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.licenses=Apache-2.0
+
+docker_manifests:
+  - name_template: ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}
+    image_templates:
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-amd64
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-arm64
+
+  - name_template: ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:latest
+    image_templates:
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-amd64
+      - ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:{{ .Tag }}-arm64
