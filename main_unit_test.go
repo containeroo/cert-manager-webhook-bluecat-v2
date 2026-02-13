@@ -147,6 +147,59 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestIsQuickDeployEnabled(t *testing.T) {
+	cfgDefault := customDNSProviderConfig{}
+	if !isQuickDeployEnabled(cfgDefault) {
+		t.Fatalf("expected quickDeploy default to true")
+	}
+
+	disabled := false
+	cfgDisabled := customDNSProviderConfig{QuickDeploy: &disabled}
+	if isQuickDeployEnabled(cfgDisabled) {
+		t.Fatalf("expected quickDeploy=false to disable quick deploy")
+	}
+
+	enabled := true
+	cfgEnabled := customDNSProviderConfig{QuickDeploy: &enabled}
+	if !isQuickDeployEnabled(cfgEnabled) {
+		t.Fatalf("expected quickDeploy=true to enable quick deploy")
+	}
+}
+
+func TestBuildQuickDeployAttempts(t *testing.T) {
+	attempts := buildQuickDeployAttempts(42, []int64{10, 10, -1, 11})
+	if len(attempts) != 6 {
+		t.Fatalf("expected 6 attempts, got %d", len(attempts))
+	}
+
+	firstBody, ok := attempts[0].body.(map[string]any)
+	if !ok {
+		t.Fatalf("expected first attempt to include JSON body")
+	}
+	entityIDs, ok := firstBody["entityIds"].([]int64)
+	if !ok {
+		t.Fatalf("expected first attempt entityIds to be []int64")
+	}
+	if len(entityIDs) != 2 || entityIDs[0] != 10 || entityIDs[1] != 11 {
+		t.Fatalf("unexpected entityIds in first attempt: %v", entityIDs)
+	}
+
+	thirdQuery := attempts[2].query
+	if got := thirdQuery.Get("entityIds"); got != "10,11" {
+		t.Fatalf("expected entityIds query to be 10,11, got %q", got)
+	}
+
+	zoneOnly := buildQuickDeployAttempts(7, nil)
+	if len(zoneOnly) != 3 {
+		t.Fatalf("expected 3 zone-level attempts, got %d", len(zoneOnly))
+	}
+
+	none := buildQuickDeployAttempts(0, nil)
+	if len(none) != 0 {
+		t.Fatalf("expected no attempts when zone and record IDs are missing, got %d", len(none))
+	}
+}
+
 func secretRef(name, key string) *cmmeta.SecretKeySelector {
 	return &cmmeta.SecretKeySelector{
 		LocalObjectReference: cmmeta.LocalObjectReference{

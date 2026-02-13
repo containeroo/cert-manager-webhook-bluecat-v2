@@ -91,6 +91,7 @@ Notes:
 | `zoneID` | no | Numeric BlueCat zone ID |
 | `zone` | no | Zone name, example `example.com`; if omitted, cert-manager `resolvedZone` is used |
 | `ttl` | no | TXT TTL in seconds, default `120` |
+| `quickDeploy` | no | Trigger BlueCat quick deploy after TXT create/delete, default `true` |
 | `insecureSkipTLSVerify` | no | Skip TLS verification (avoid in production) |
 | `caBundleSecretRef` | no | Secret ref for PEM CA bundle used to trust BlueCat TLS cert |
 | `bearerTokenSecretRef` | one auth mode required | Secret ref containing bearer token |
@@ -157,6 +158,7 @@ spec:
               view: internal
               zone: example.com
               ttl: 120
+              quickDeploy: true
               username: cert-manager
               passwordSecretRef:
                 name: bluecat-auth

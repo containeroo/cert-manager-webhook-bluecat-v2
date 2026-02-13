@@ -79,6 +79,7 @@ type customDNSProviderConfig struct {
 	Zone                  string                    `json:"zone,omitempty"`
 	ZoneID                int64                     `json:"zoneID,omitempty"`
 	TTL                   int64                     `json:"ttl,omitempty"`
+	QuickDeploy           *bool                     `json:"quickDeploy,omitempty"`
 	Username              string                    `json:"username,omitempty"`
 	InsecureSkipTLSVerify bool                      `json:"insecureSkipTLSVerify,omitempty"`
 	PasswordSecretRef     *cmmeta.SecretKeySelector `json:"passwordSecretRef,omitempty"`
@@ -134,7 +135,14 @@ func (c *customDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 		return err
 	}
 	if len(records) > 0 {
-		return nil
+		if !isQuickDeployEnabled(cfg) {
+			return nil
+		}
+		recordIDs, err := extractRecordIDs(records)
+		if err != nil {
+			return err
+		}
+		return cl.triggerQuickDeploy(ctx, zoneID, recordIDs)
 	}
 
 	ttl := cfg.TTL
@@ -150,21 +158,24 @@ func (c *customDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 		"rdata":        quoteTXTValue(ch.Key),
 	}
 
-	status, _, err := cl.doJSON(ctx, http.MethodPost, fmt.Sprintf("/zones/%d/resourceRecords", zoneID), nil, payload, nil, http.StatusCreated, http.StatusOK, http.StatusConflict)
+	_, _, err = cl.doJSON(ctx, http.MethodPost, fmt.Sprintf("/zones/%d/resourceRecords", zoneID), nil, payload, nil, http.StatusCreated, http.StatusOK, http.StatusConflict)
 	if err != nil {
 		return err
 	}
-	if status == http.StatusConflict {
-		records, err := cl.findMatchingTXTRecords(ctx, zoneID, fqdn, relativeName, ch.Key)
-		if err != nil {
-			return err
-		}
-		if len(records) == 0 {
-			return fmt.Errorf("bluecat rejected TXT record creation with conflict for %s", fqdn)
-		}
+
+	if !isQuickDeployEnabled(cfg) {
+		return nil
 	}
 
-	return nil
+	records, err = cl.findMatchingTXTRecords(ctx, zoneID, fqdn, relativeName, ch.Key)
+	if err != nil {
+		return err
+	}
+	recordIDs, err := extractRecordIDs(records)
+	if err != nil {
+		return err
+	}
+	return cl.triggerQuickDeploy(ctx, zoneID, recordIDs)
 }
 
 // CleanUp should delete the relevant TXT record from the DNS provider console.
@@ -204,6 +215,7 @@ func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	if err != nil {
 		return err
 	}
+	deletedRecordIDs := make([]int64, 0, len(records))
 
 	for _, rr := range records {
 		recordID, err := parseObjectID(rr)
@@ -214,9 +226,14 @@ func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 		if err != nil {
 			return err
 		}
+		deletedRecordIDs = append(deletedRecordIDs, recordID)
 	}
 
-	return nil
+	if !isQuickDeployEnabled(cfg) {
+		return nil
+	}
+
+	return cl.triggerQuickDeploy(ctx, zoneID, deletedRecordIDs)
 }
 
 // Initialize will be called when the webhook first starts.
@@ -504,6 +521,11 @@ type collectionResponse struct {
 	Links map[string]any   `json:"_links"`
 }
 
+type quickDeployAttempt struct {
+	query url.Values
+	body  any
+}
+
 func (c *bluecatClient) resolveZoneID(ctx context.Context, zoneName, viewName string) (int64, error) {
 	filterCandidates := []string{
 		fmt.Sprintf("name:eq('%s')", escapeFilterValue(zoneName)),
@@ -561,6 +583,34 @@ func (c *bluecatClient) findMatchingTXTRecords(ctx context.Context, zoneID int64
 		return nil, err
 	}
 	return findTXTRecordMatches(records, fqdn, relativeName, key), nil
+}
+
+func (c *bluecatClient) triggerQuickDeploy(ctx context.Context, zoneID int64, recordIDs []int64) error {
+	attempts := buildQuickDeployAttempts(zoneID, recordIDs)
+	if len(attempts) == 0 {
+		return nil
+	}
+
+	var lastErr error
+	for _, attempt := range attempts {
+		_, _, err := c.doJSON(
+			ctx,
+			http.MethodPost,
+			"/deployments",
+			attempt.query,
+			attempt.body,
+			nil,
+			http.StatusAccepted,
+			http.StatusCreated,
+			http.StatusOK,
+		)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+	}
+
+	return fmt.Errorf("failed to trigger BlueCat quick deploy: %w", lastErr)
 }
 
 func (c *bluecatClient) listCollection(ctx context.Context, endpointPath, filter string) ([]map[string]any, error) {
@@ -665,6 +715,107 @@ func statusAllowed(status int, allowed []int) bool {
 		}
 	}
 	return false
+}
+
+func isQuickDeployEnabled(cfg customDNSProviderConfig) bool {
+	if cfg.QuickDeploy == nil {
+		return true
+	}
+	return *cfg.QuickDeploy
+}
+
+func extractRecordIDs(records []map[string]any) ([]int64, error) {
+	ids := make([]int64, 0, len(records))
+	for _, record := range records {
+		id, err := parseObjectID(record)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func buildQuickDeployAttempts(zoneID int64, recordIDs []int64) []quickDeployAttempt {
+	ids := dedupePositiveIDs(recordIDs)
+	attempts := make([]quickDeployAttempt, 0, 8)
+
+	if len(ids) > 0 {
+		idsCSV := joinIDsCSV(ids)
+		attempts = append(attempts,
+			quickDeployAttempt{
+				body: map[string]any{
+					"entityIds":  ids,
+					"properties": "scope=specific|services=DNS",
+				},
+			},
+			quickDeployAttempt{
+				body: map[string]any{
+					"entityIds": ids,
+					"properties": map[string]any{
+						"scope":    "specific",
+						"services": "DNS",
+					},
+				},
+			},
+			quickDeployAttempt{
+				query: url.Values{
+					"entityIds":  []string{idsCSV},
+					"properties": []string{"scope=specific|services=DNS"},
+				},
+			},
+		)
+	}
+
+	if zoneID > 0 {
+		zoneIDStr := strconv.FormatInt(zoneID, 10)
+		attempts = append(attempts,
+			quickDeployAttempt{
+				body: map[string]any{
+					"entityId":   zoneID,
+					"properties": "services=DNS",
+				},
+			},
+			quickDeployAttempt{
+				body: map[string]any{
+					"entityIds":  []int64{zoneID},
+					"properties": "services=DNS",
+				},
+			},
+			quickDeployAttempt{
+				query: url.Values{
+					"entityId":   []string{zoneIDStr},
+					"properties": []string{"services=DNS"},
+				},
+			},
+		)
+	}
+
+	return attempts
+}
+
+func dedupePositiveIDs(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func joinIDsCSV(ids []int64) string {
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, ",")
 }
 
 func selectZoneID(zones []map[string]any, zoneName, viewName string) (int64, bool, error) {
