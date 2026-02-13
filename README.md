@@ -2,86 +2,224 @@
   <img src="https://raw.githubusercontent.com/cert-manager/cert-manager/d53c0b9270f8cd90d908460d69502694e1838f5f/logo/logo-small.png" height="256" width="256" alt="cert-manager project logo" />
 </p>
 
-# ACME webhook example
+# cert-manager BlueCat Webhook
 
-The ACME issuer type supports an optional 'webhook' solver, which can be used
-to implement custom DNS01 challenge solving logic.
+This repository contains a cert-manager DNS01 webhook solver for BlueCat
+Address Manager REST v2.
 
-This is useful if you need to use cert-manager with a DNS provider that is not
-officially supported in cert-manager core.
+- Webhook solver name: `bluecat-address-manager`
+- Helm chart: `deploy/bluecat-webhook`
+- Default image repo (chart): `ghcr.io/containeroo/cert-manager-webhook-bluecat-v2`
 
-## Why not in core?
+BlueCat API docs:
+https://docs.bluecatnetworks.com/r/Address-Manager-RESTful-v2-API-Guide/
 
-As the project & adoption has grown, there has been an influx of DNS provider
-pull requests to our core codebase. As this number has grown, the test matrix
-has become un-maintainable and so, it's not possible for us to certify that
-providers work to a sufficient level.
+## How It Works
 
-By creating this 'interface' between cert-manager and DNS providers, we allow
-users to quickly iterate and test out new integrations, and then packaging
-those up themselves as 'extensions' to cert-manager.
+cert-manager sends DNS01 challenge requests to this webhook API service.
+The solver then:
 
-We can also then provide a standardised 'testing framework', or set of
-conformance tests, which allow us to validate that a DNS provider works as
-expected.
+1. Authenticates to BlueCat.
+2. Resolves the target zone.
+3. Creates a TXT record for `_acme-challenge.<domain>`.
+4. Deletes only the matching TXT value during cleanup.
 
-## Creating your own webhook
+The webhook supports these auth modes:
 
-Webhook's themselves are deployed as Kubernetes API services, in order to allow
-administrators to restrict access to webhooks with Kubernetes RBAC.
+- bearer token from Kubernetes secret
+- basic auth from Kubernetes secret
+- username + password secret (creates BlueCat session via `/api/v2/sessions`)
 
-This is important, as otherwise it'd be possible for anyone with access to your
-webhook to complete ACME challenge validations and obtain certificates.
+## Prerequisites
 
-To make the set up of these webhook's easier, we provide a template repository
-that can be used to get started quickly.
+1. Kubernetes cluster.
+2. cert-manager installed and running.
+3. Access to BlueCat Address Manager REST v2 endpoint.
+4. A DNS zone in BlueCat for the domains you will validate.
+5. Permission to install cluster-scoped RBAC and APIService resources.
 
-When implementing your webhook, you should set the `groupName` in the
-[values.yml](deploy/bluecat-webhook/values.yaml) of your chart to a domain name that 
-you - as the webhook-author - own. It should not need to be adjusted by the users of
-your chart.
+## Release Pipeline
 
-### Creating your own repository
+GitHub Actions workflow: `.github/workflows/build.yml`
 
-### Running the test suite
+Trigger:
 
-All DNS providers **must** run the DNS01 provider conformance testing suite,
-else they will have undetermined behaviour when used with cert-manager.
+- push a tag matching `v*` (example: `v0.1.0`)
 
-**It is essential that you configure and run the test suite when creating a
-DNS01 webhook.**
+What it does:
 
-An example Go test file has been provided in [main_test.go](https://github.com/cert-manager/webhook-example/blob/master/main_test.go).
+1. Runs `go test ./...`
+2. Runs GoReleaser (`.goreleaser.yaml`)
+3. Builds and pushes multi-arch images to GHCR:
+   - `ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:<tag>`
+   - `ghcr.io/containeroo/cert-manager-webhook-bluecat-v2:latest`
 
-You can run the test suite with:
+Release commands:
 
 ```bash
-$ TEST_ZONE_NAME=example.com. make test
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-The example file has a number of areas you must fill in and replace with your
-own options in order for tests to pass.
+## Install The Webhook
 
-## BlueCat Address Manager REST v2
+Install or upgrade from this repository checkout:
 
-This repository's `main.go` is implemented for BlueCat Address Manager REST v2.
+```bash
+helm upgrade --install bluecat-webhook ./deploy/bluecat-webhook \
+  --namespace cert-manager \
+  --create-namespace \
+  --set groupName=acme.bluecat.yourdomain.tld \
+  --set image.repository=ghcr.io/containeroo/cert-manager-webhook-bluecat-v2 \
+  --set image.tag=v0.1.0
+```
 
-Solver name: `bluecat-address-manager`
+Notes:
 
-Required `webhook.config` fields:
+- `groupName` must be a DNS name you own. Keep it stable.
+- The same `groupName` must be used in your Issuer/ClusterIssuer webhook stanza.
 
-- `apiHost`: BlueCat BAM base URL, e.g. `https://bam.example.internal`
-- credentials using one of:
+## BlueCat Solver Config
+
+`webhook.config` supports:
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `apiHost` | yes | BlueCat base URL, example `https://bam.example.internal` |
+| `apiPath` | no | REST base path, default `/api/v2` |
+| `view` | no | BlueCat DNS view name (recommended when zone names overlap) |
+| `zoneID` | no | Numeric BlueCat zone ID |
+| `zone` | no | Zone name, example `example.com`; if omitted, cert-manager `resolvedZone` is used |
+| `ttl` | no | TXT TTL in seconds, default `120` |
+| `insecureSkipTLSVerify` | no | Skip TLS verification (avoid in production) |
+| `caBundleSecretRef` | no | Secret ref for PEM CA bundle used to trust BlueCat TLS cert |
+| `bearerTokenSecretRef` | one auth mode required | Secret ref containing bearer token |
+| `basicAuthSecretRef` | one auth mode required | Secret ref containing either `username:password` or base64 basic credentials |
+| `username` | one auth mode required | BlueCat username when using session login |
+| `passwordSecretRef` | one auth mode required | Secret ref containing password when using session login |
+
+Authentication requirement:
+
+- configure exactly one of:
   - `bearerTokenSecretRef`
   - `basicAuthSecretRef`
   - `username` + `passwordSecretRef`
 
-Optional fields:
+## Secrets
 
-- `apiPath` (default `/api/v2`)
-- `view`
-- `zoneID`
-- `zone` (if omitted, cert-manager `ResolvedZone` is used)
-- `ttl` (default `120`)
-- `insecureSkipTLSVerify`
-- `caBundleSecretRef`
+Create a secret for username/password session auth:
+
+```bash
+kubectl -n cert-manager create secret generic bluecat-auth \
+  --from-literal=password='YOUR_BLUECAT_PASSWORD'
+```
+
+Create a secret for bearer token auth:
+
+```bash
+kubectl -n cert-manager create secret generic bluecat-token \
+  --from-literal=token='YOUR_BLUECAT_TOKEN'
+```
+
+Create a secret for custom CA bundle:
+
+```bash
+kubectl -n cert-manager create secret generic bluecat-ca \
+  --from-file=ca.crt=./bluecat-ca.pem
+```
+
+Namespace rules:
+
+- For `Issuer`, the secret must be in the same namespace as the `Issuer`.
+- For `ClusterIssuer`, the secret must be in cert-manager's cluster resource namespace (typically `cert-manager`).
+
+## ClusterIssuer Example
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-bluecat
+spec:
+  acme:
+    email: you@example.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-bluecat-account-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.bluecat.yourdomain.tld
+            solverName: bluecat-address-manager
+            config:
+              apiHost: https://bam.example.internal
+              apiPath: /api/v2
+              view: internal
+              zone: example.com
+              ttl: 120
+              username: cert-manager
+              passwordSecretRef:
+                name: bluecat-auth
+                key: password
+              # Optional custom CA:
+              # caBundleSecretRef:
+              #   name: bluecat-ca
+              #   key: ca.crt
+```
+
+## Certificate Example
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app-example-com
+  namespace: default
+spec:
+  secretName: app-example-com-tls
+  issuerRef:
+    name: letsencrypt-bluecat
+    kind: ClusterIssuer
+  dnsNames:
+    - app.example.com
+```
+
+## Verify Deployment
+
+```bash
+kubectl get apiservice | grep acme.bluecat.yourdomain.tld
+kubectl -n cert-manager get deploy,po | grep bluecat-webhook
+kubectl -n cert-manager logs deploy/bluecat-webhook
+kubectl get challenges -A
+kubectl get orders -A
+```
+
+## Troubleshooting
+
+- `no such host` or timeout to BlueCat:
+  - check `apiHost`, network policies, and DNS resolution from webhook pod.
+- TLS errors to BlueCat:
+  - provide `caBundleSecretRef` or correct server certificate chain.
+- `secret ... not found`:
+  - verify secret namespace and key names.
+- zone not found:
+  - set `zoneID`, or set `zone` + `view` explicitly.
+- challenge stuck in pending:
+  - inspect webhook pod logs and `Challenge` events.
+
+## Testing Locally
+
+Unit tests:
+
+```bash
+go test ./...
+```
+
+Integration conformance tests are tagged:
+
+```bash
+go test -tags=integration .
+```
+
+The integration test requires kubebuilder test assets (`etcd`, `kube-apiserver`,
+`kubectl`) and environment variables used by cert-manager's test harness.
