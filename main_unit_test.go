@@ -184,9 +184,22 @@ func TestBuildQuickDeployAttempts(t *testing.T) {
 		t.Fatalf("unexpected entityIds in first attempt: %v", entityIDs)
 	}
 
-	thirdQuery := attempts[2].query
-	if got := thirdQuery.Get("entityIds"); got != "10,11" {
-		t.Fatalf("expected entityIds query to be 10,11, got %q", got)
+	thirdBody, ok := attempts[2].body.(map[string]any)
+	if !ok {
+		t.Fatalf("expected third attempt to include JSON body")
+	}
+	stringIDs, ok := thirdBody["entityIds"].([]string)
+	if !ok {
+		t.Fatalf("expected third attempt entityIds to be []string")
+	}
+	if len(stringIDs) != 2 || stringIDs[0] != "10" || stringIDs[1] != "11" {
+		t.Fatalf("unexpected string entityIds in third attempt: %v", stringIDs)
+	}
+
+	for i, attempt := range attempts {
+		if attempt.body == nil {
+			t.Fatalf("attempt %d should always include a request body", i)
+		}
 	}
 
 	zoneOnly := buildQuickDeployAttempts(7, nil)

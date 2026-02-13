@@ -522,7 +522,7 @@ type collectionResponse struct {
 }
 
 type quickDeployAttempt struct {
-	query url.Values
+	name  string
 	body  any
 }
 
@@ -591,13 +591,13 @@ func (c *bluecatClient) triggerQuickDeploy(ctx context.Context, zoneID int64, re
 		return nil
 	}
 
-	var lastErr error
+	errorsByAttempt := make([]string, 0, len(attempts))
 	for _, attempt := range attempts {
 		_, _, err := c.doJSON(
 			ctx,
 			http.MethodPost,
 			"/deployments",
-			attempt.query,
+			nil,
 			attempt.body,
 			nil,
 			http.StatusAccepted,
@@ -607,10 +607,10 @@ func (c *bluecatClient) triggerQuickDeploy(ctx context.Context, zoneID int64, re
 		if err == nil {
 			return nil
 		}
-		lastErr = err
+		errorsByAttempt = append(errorsByAttempt, fmt.Sprintf("%s: %v", attempt.name, err))
 	}
 
-	return fmt.Errorf("failed to trigger BlueCat quick deploy: %w", lastErr)
+	return fmt.Errorf("failed to trigger BlueCat quick deploy: %s", strings.Join(errorsByAttempt, " | "))
 }
 
 func (c *bluecatClient) listCollection(ctx context.Context, endpointPath, filter string) ([]map[string]any, error) {
@@ -741,15 +741,16 @@ func buildQuickDeployAttempts(zoneID int64, recordIDs []int64) []quickDeployAtte
 	attempts := make([]quickDeployAttempt, 0, 8)
 
 	if len(ids) > 0 {
-		idsCSV := joinIDsCSV(ids)
 		attempts = append(attempts,
 			quickDeployAttempt{
+				name: "selective-deploy-properties-string",
 				body: map[string]any{
 					"entityIds":  ids,
 					"properties": "scope=specific|services=DNS",
 				},
 			},
 			quickDeployAttempt{
+				name: "selective-deploy-properties-map",
 				body: map[string]any{
 					"entityIds": ids,
 					"properties": map[string]any{
@@ -759,33 +760,36 @@ func buildQuickDeployAttempts(zoneID int64, recordIDs []int64) []quickDeployAtte
 				},
 			},
 			quickDeployAttempt{
-				query: url.Values{
-					"entityIds":  []string{idsCSV},
-					"properties": []string{"scope=specific|services=DNS"},
+				name: "selective-deploy-string-ids",
+				body: map[string]any{
+					"entityIds":  idsToStrings(ids),
+					"properties": "scope=specific|services=DNS",
 				},
 			},
 		)
 	}
 
 	if zoneID > 0 {
-		zoneIDStr := strconv.FormatInt(zoneID, 10)
 		attempts = append(attempts,
 			quickDeployAttempt{
+				name: "quick-deploy-zone-entityId",
 				body: map[string]any{
 					"entityId":   zoneID,
 					"properties": "services=DNS",
 				},
 			},
 			quickDeployAttempt{
+				name: "quick-deploy-zone-entityIds",
 				body: map[string]any{
 					"entityIds":  []int64{zoneID},
 					"properties": "services=DNS",
 				},
 			},
 			quickDeployAttempt{
-				query: url.Values{
-					"entityId":   []string{zoneIDStr},
-					"properties": []string{"services=DNS"},
+				name: "quick-deploy-zone-empty-properties",
+				body: map[string]any{
+					"entityId":   zoneID,
+					"properties": "",
 				},
 			},
 		)
@@ -810,12 +814,12 @@ func dedupePositiveIDs(ids []int64) []int64 {
 	return out
 }
 
-func joinIDsCSV(ids []int64) string {
-	parts := make([]string, 0, len(ids))
+func idsToStrings(ids []int64) []string {
+	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		parts = append(parts, strconv.FormatInt(id, 10))
+		out = append(out, strconv.FormatInt(id, 10))
 	}
-	return strings.Join(parts, ",")
+	return out
 }
 
 func selectZoneID(zones []map[string]any, zoneName, viewName string) (int64, bool, error) {
